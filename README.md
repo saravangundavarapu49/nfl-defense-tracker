@@ -6,6 +6,18 @@ individual player** defensive performance in
 Charts render natively inside the window (Matplotlib `FigureCanvasTkAgg`) with hover
 tooltips plus zoom / pan / save via the embedded toolbar.
 
+## Quick start (Windows)
+
+1. On GitHub click the green **Code** button -> **Download ZIP**.
+2. In your Downloads folder, right-click the zip -> **Extract All...** -> **Extract**.
+3. In the extracted folder, double-click **`Start-Tracker-Windows.bat`**.
+   - If Python is missing it opens the download page: install it (tick
+     **"Add python.exe to PATH"**) and double-click the file again.
+   - The first start installs the libraries (a few minutes); later starts are instant.
+   - If Windows shows "Windows protected your PC", click **More info** -> **Run anyway**.
+4. In the app click **Upload CSV / Parquet...** and pick your nflverse files
+   (see [Getting data](#getting-data)).
+
 ## Features
 
 - **Local file uploader** - pick one or many `.csv`, `.csv.gz` or `.parquet` files. The
