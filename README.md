@@ -15,8 +15,12 @@ tooltips plus zoom / pan / save via the embedded toolbar.
      **"Add python.exe to PATH"**) and double-click the file again.
    - The first start installs the libraries (a few minutes); later starts are instant.
    - If Windows shows "Windows protected your PC", click **More info** -> **Run anyway**.
-4. In the app click **Upload CSV / Parquet...** and pick your nflverse files
-   (see [Getting data](#getting-data)).
+4. Download the 2023 data files (click each link; they go to your Downloads folder):
+   [play_by_play_2023.parquet](https://github.com/nflverse/nflverse-data/releases/download/pbp/play_by_play_2023.parquet),
+   [pbp_participation_2023.parquet](https://github.com/nflverse/nflverse-data/releases/download/pbp_participation/pbp_participation_2023.parquet),
+   [ftn_charting_2023.parquet](https://github.com/nflverse/nflverse-data/releases/download/ftn_charting/ftn_charting_2023.parquet).
+5. In the app click **Upload CSV / Parquet...**, go to Downloads, select all three files
+   (hold **Ctrl** and click each one) and click **Open**.
 
 ## Features
 
