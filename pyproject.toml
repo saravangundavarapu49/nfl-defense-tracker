@@ -1,0 +1,30 @@
+[project]
+name = "nfl-defense-tracker"
+version = "0.1.0"
+description = "Desktop NFL defensive analytics tracker for nflverse play-by-play data"
+requires-python = ">=3.10"
+dependencies = [
+    "customtkinter>=5.2.2,<7",
+    "matplotlib>=3.8",
+    "pandas>=2.0",
+    "pyarrow>=14",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+nfl-defense-tracker = "nfl_defense_tracker.app:run"
+
+[tool.setuptools]
+packages = ["nfl_defense_tracker"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
