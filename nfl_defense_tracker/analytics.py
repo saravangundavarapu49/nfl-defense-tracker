@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .data import COVERAGE_ORDER
+from .data import COVERAGE_ORDER, PLAYER_ID_COLUMNS, PLAYER_STATS
 
 ALL = "All"
 DISTANCE_BUCKETS = ["Short (1-2)", "Medium (3-6)", "Long (7-10)", "Very Long (11+)"]
@@ -21,19 +21,50 @@ class Filters:
     team: str = ALL
     week_min: int = 1
     week_max: int = 22
+    player_id: str = ALL
+    player_name: str = ""
 
 
 @dataclass(frozen=True)
 class Scope:
-    """League-wide plays (all filters but team) and the selected defense's plays."""
+    """League-wide plays (all filters but team/player), the selected defense's plays
+    (`defense`) and the analyzed subset (`team`: the defense, narrowed to snaps where the
+    selected player was on the field)."""
 
     league: pd.DataFrame
     team: pd.DataFrame
     team_name: str
+    player_id: str = ALL
+    player_name: str = ""
+    defense: pd.DataFrame | None = None
 
     @property
     def has_team(self) -> bool:
-        return self.team_name != ALL
+        return self.team_name != ALL or self.has_player
+
+    @property
+    def has_player(self) -> bool:
+        return self.player_id != ALL
+
+    @property
+    def label(self) -> str:
+        if self.has_player:
+            return self.player_name
+        return self.team_name if self.team_name != ALL else "League"
+
+    @property
+    def pool(self) -> pd.DataFrame:
+        """Plays used for player leaderboards (ignores the player filter)."""
+        return self.defense if self.defense is not None else self.team
+
+
+def player_mask(df: pd.DataFrame, player_id: str) -> pd.Series:
+    """Plays where the player was on the field or credited with a defensive stat."""
+    mask = df["defenders"].map(lambda ids: player_id in ids).astype(bool)
+    for col in PLAYER_ID_COLUMNS:
+        if col in df.columns:
+            mask |= (df[col] == player_id).fillna(False).astype(bool)
+    return mask
 
 
 def apply_filters(df: pd.DataFrame, filters: Filters) -> Scope:
@@ -44,8 +75,13 @@ def apply_filters(df: pd.DataFrame, filters: Filters) -> Scope:
         mask &= df["season_type"] == filters.season_type
     mask &= df["week"].between(filters.week_min, filters.week_max) | df["week"].isna()
     league = df[mask]
-    team = league[league["defteam"] == filters.team] if filters.team != ALL else league
-    return Scope(league=league, team=team, team_name=filters.team)
+    defense = league[league["defteam"] == filters.team] if filters.team != ALL else league
+    team = defense
+    if filters.player_id != ALL:
+        team = defense[player_mask(defense, filters.player_id)]
+    return Scope(league=league, team=team, team_name=filters.team,
+                 player_id=filters.player_id, player_name=filters.player_name or
+                 filters.player_id, defense=defense)
 
 
 def _safe_div(num: float, den: float) -> float:
@@ -118,7 +154,7 @@ def coverage_usage(scope: Scope) -> pd.DataFrame:
     league = shares(scope.league)
     out = pd.DataFrame({"League %": league})
     if scope.has_team:
-        out.insert(0, f"{scope.team_name} %", shares(scope.team))
+        out.insert(0, f"{scope.label} %", shares(scope.team))
     out = out.fillna(0.0)
     order = [c for c in COVERAGE_ORDER if c in out.index] + [
         c for c in out.index if c not in COVERAGE_ORDER
@@ -289,7 +325,7 @@ def blitz_rate_by_down(scope: Scope) -> pd.DataFrame:
 
     out = pd.DataFrame({"League %": rates(scope.league)})
     if scope.has_team:
-        out.insert(0, f"{scope.team_name} %", rates(scope.team))
+        out.insert(0, f"{scope.label} %", rates(scope.team))
     out.index = [f"{int(d)}{'st' if d == 1 else 'nd' if d == 2 else 'rd' if d == 3 else 'th'}"
                  f" Down" for d in out.index]
     return out.rename_axis("Down").reset_index()
@@ -310,3 +346,160 @@ def team_blitz_profile(league: pd.DataFrame) -> pd.DataFrame:
         "Dropbacks": grouped.size().astype(float),
     })
     return out.rename_axis("Team").reset_index().sort_values("Blitz %", ascending=False)
+
+
+# --- Players ---------------------------------------------------------------------
+
+EVENT_COLUMNS = ["play", "player_id", "name", "team", "stat", "value"]
+STAT_NAMES = list(PLAYER_STATS)
+PLAYER_INFO = ["player_id", "Player", "Pos", "Team"]
+
+
+def player_events(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per defensive credit (tackle, sack, PD, ...) with the play's index.
+
+    Tackles credited to the offense (e.g. after an interception) are dropped."""
+    frames = []
+    for stat, slots in PLAYER_STATS.items():
+        for prefix, weight in slots:
+            id_col, name_col, team_col = (f"{prefix}_player_id", f"{prefix}_player_name",
+                                          f"{prefix}_team")
+            if id_col not in df.columns:
+                continue
+            rows = df[df[id_col].notna()]
+            if team_col in rows.columns:
+                rows = rows[rows[team_col].isna() | (rows[team_col] == rows["defteam"])]
+            if rows.empty:
+                continue
+            names = rows[name_col] if name_col in rows.columns else rows[id_col]
+            frames.append(pd.DataFrame({
+                "play": rows.index, "player_id": rows[id_col].astype(str).to_numpy(),
+                "name": names.astype(str).to_numpy(), "team": rows["defteam"].to_numpy(),
+                "stat": stat, "value": weight,
+            }))
+    if not frames:
+        return pd.DataFrame(columns=EVENT_COLUMNS)
+    return pd.concat(frames, ignore_index=True)
+
+
+def on_field(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per (play, defender on the field), indexed by the play's index."""
+    cols = ["defenders", "defender_names", "defender_positions", "defteam", "epa", "success"]
+    plays = df.loc[df["defenders"].str.len() > 0, cols]
+    if plays.empty:
+        return pd.DataFrame(columns=["player_id", "name", "pos", "defteam", "epa", "success"])
+    out = plays.explode(["defenders", "defender_names", "defender_positions"])
+    return out.rename(columns={"defenders": "player_id", "defender_names": "name",
+                               "defender_positions": "pos"})
+
+
+def player_stats(plays: pd.DataFrame, stopped: pd.Series | None = None) -> pd.DataFrame:
+    """Per-defender box score over `plays`.
+
+    Snaps / Stop % / EPA/Play use on-field participation data (when loaded); a *stop* is a
+    play where `stopped` is true (default: unsuccessful offensive play) and *Stops* counts
+    such plays where the player made the tackle or sack."""
+    if stopped is None:
+        stopped = plays["success"].fillna(1) == 0
+    stopped = stopped.reindex(plays.index).fillna(False).astype(bool)
+    events = player_events(plays)
+    field = on_field(plays)
+    if events.empty and field.empty:
+        return pd.DataFrame(columns=[*PLAYER_INFO, "Snaps", "Tackles", "Stops", *STAT_NAMES,
+                                     "Stop %", "EPA/Play"])
+
+    counts = events.pivot_table(index="player_id", columns="stat", values="value",
+                                aggfunc="sum", fill_value=0.0)
+    out = counts.reindex(columns=STAT_NAMES, fill_value=0.0)
+    makers = events[events["stat"].isin(["Solo", "Ast", "Sacks"])
+                    & events["play"].map(stopped).fillna(False).astype(bool)]
+    stops = makers.groupby("player_id")["play"].nunique().astype(float)
+    info = events.groupby("player_id").agg(Player=("name", "last"), Team=("team", "last"))
+    info["Pos"] = ""
+
+    if not field.empty:
+        field = field.assign(stopped=stopped.loc[field.index].to_numpy(dtype=float))
+        grouped = field.groupby("player_id")
+        field_stats = pd.DataFrame({
+            "Snaps": grouped.size().astype(float),
+            "Stop %": grouped["stopped"].mean(),
+            "EPA/Play": grouped["epa"].mean(),
+        })
+        field_info = grouped.agg(Player=("name", "last"), Team=("defteam", "last"),
+                                 Pos=("pos", "last"))
+        info = field_info.combine_first(info)
+    else:
+        field_stats = pd.DataFrame(columns=["Snaps", "Stop %", "EPA/Play"], dtype=float)
+
+    out = out.reindex(info.index.union(out.index), fill_value=0.0)
+    out["Tackles"] = out["Solo"] + out["Ast"]
+    out["Stops"] = stops.reindex(out.index).fillna(0.0)
+    out = out.join(field_stats).join(info)
+    out = out.rename_axis("player_id").reset_index()
+    ordered = [*PLAYER_INFO, "Snaps", "Tackles", "Stops", *STAT_NAMES, "Stop %", "EPA/Play"]
+    return out[ordered]
+
+
+def _player_sort(df: pd.DataFrame, by: list[str]) -> pd.DataFrame:
+    return df.sort_values([*by, "Snaps"], ascending=False, na_position="last"
+                          ).reset_index(drop=True)
+
+
+def roster(df: pd.DataFrame) -> pd.DataFrame:
+    """Defenders appearing in `df`, most snaps (or tackles) first."""
+    stats = player_stats(df)
+    return _player_sort(stats, ["Snaps", "Tackles"])[[*PLAYER_INFO, "Snaps", "Tackles"]]
+
+
+def player_coverage(df: pd.DataFrame) -> pd.DataFrame:
+    """Dropback box score: plays on the ball plus on-field EPA in man and zone."""
+    plays = df[df["is_pass_play"]]
+    out = player_stats(plays)
+    out["Plays on Ball"] = out["PD"] + out["INT"]
+    field = on_field(plays[plays["man_zone"].notna()])
+    if not field.empty:
+        field = field.assign(man_zone=plays.loc[field.index, "man_zone"].to_numpy())
+        split = field.pivot_table(index="player_id", columns="man_zone", values="epa",
+                                  aggfunc="mean")
+        for scheme in ("Man", "Zone"):
+            values = split[scheme] if scheme in split.columns else pd.Series(dtype=float)
+            out[f"{scheme} EPA"] = out["player_id"].map(values)
+    cols = [*PLAYER_INFO, "Snaps", "Plays on Ball", "PD", "INT", "Tackles", "EPA/Play",
+            "Man EPA", "Zone EPA"]
+    out = out[[c for c in cols if c in out.columns]]
+    return _player_sort(out, ["Plays on Ball", "PD"])
+
+
+def player_third_down(df: pd.DataFrame) -> pd.DataFrame:
+    plays = third_down_plays(df)
+    out = player_stats(plays, plays["converted"] == 0)
+    cols = [*PLAYER_INFO, "Snaps", "Stops", "Tackles", "Sacks", "PD", "INT", "Stop %",
+            "EPA/Play"]
+    return _player_sort(out[cols], ["Stops", "Tackles"])
+
+
+def player_fourth_and_one(df: pd.DataFrame) -> pd.DataFrame:
+    plays = fourth_and_one_plays(df)
+    out = player_stats(plays, plays["stopped"] == 1)
+    cols = [*PLAYER_INFO, "Snaps", "Stops", "Tackles", "TFL", "Sacks", "Stop %", "EPA/Play"]
+    return _player_sort(out[cols], ["Stops", "Tackles"])
+
+
+def player_pass_rush(df: pd.DataFrame) -> pd.DataFrame:
+    """Dropback pass-rush box score, with sacks / QB hits split out on blitzes."""
+    plays = df[df["is_pass_play"]]
+    out = player_stats(plays)
+    blitz = player_events(plays[plays["blitz"] == 1])
+    for stat in ("Sacks", "QB Hits"):
+        totals = blitz[blitz["stat"] == stat].groupby("player_id")["value"].sum()
+        out[f"Blitz {stat}"] = out["player_id"].map(totals).fillna(0.0)
+    events = player_events(plays)
+    sacked = set(events.loc[events["stat"] == "Sacks", "play"])
+    hits = events[(events["stat"] == "QB Hits") & ~events["play"].isin(sacked)]
+    out["Non-Sack Hits"] = out["player_id"].map(
+        hits.groupby("player_id")["value"].sum()).fillna(0.0)
+    cols = [*PLAYER_INFO, "Snaps", "Sacks", "QB Hits", "Non-Sack Hits", "Blitz Sacks",
+            "Blitz QB Hits", "TFL", "FF", "EPA/Play"]
+    out = out[cols]
+    out = out[(out["Sacks"] > 0) | (out["QB Hits"] > 0) | (out["Snaps"] > 0)]
+    return _player_sort(out, ["Sacks", "QB Hits"])

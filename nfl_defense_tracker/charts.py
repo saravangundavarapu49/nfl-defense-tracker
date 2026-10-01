@@ -234,3 +234,52 @@ def team_scatter(
               for t, xv, yv in zip(teams, xs, ys, strict=False)]
     _finish(fig, ax, title, subtitle, theme)
     return ChartResult(fig, [HoverTarget(points, labels)])
+
+
+def player_bar(
+    players: Sequence[str],
+    series: dict[str, Sequence[float]],
+    *,
+    title: str,
+    xlabel: str,
+    fmt: Formatter,
+    theme: Theme,
+    subtitle: str = "",
+    details: Sequence[str] | None = None,
+    highlight: int | None = None,
+) -> ChartResult:
+    """Horizontal leaderboard (first player on top) with stacked series segments.
+    `highlight` is the row index of the selected player."""
+    fig, ax = _figure(theme)
+    ax.grid(axis="y", visible=False)
+    ax.grid(axis="x", color=theme.grid, linewidth=0.6, alpha=0.8)
+    y = np.arange(len(players))[::-1]
+    left = np.zeros(len(players))
+    hovers: list[HoverTarget] = []
+    for i, (name, values) in enumerate(series.items()):
+        vals = np.nan_to_num(np.asarray(values, dtype=float))
+        bars = ax.barh(y, vals, left=left, height=0.72, label=name,
+                       color=PALETTE[i % len(PALETTE)])
+        for j, rect in enumerate(bars):
+            if highlight == j:
+                rect.set_edgecolor(HIGHLIGHT_COLOR)
+                rect.set_linewidth(2)
+            label = f"{players[j]}\n{name}: {fmt(vals[j])}"
+            if details is not None:
+                label += f"\n{details[j]}"
+            hovers.append(HoverTarget(rect, [label]))
+        left += vals
+    for j, total in enumerate(left):
+        ax.annotate(fmt(total), (total, y[j]), xytext=(3, 0), textcoords="offset points",
+                    va="center", fontsize=8, color=theme.text)
+    ax.set_yticks(y, players, fontsize=8)
+    if highlight is not None:
+        tick = ax.get_yticklabels()[highlight]
+        tick.set_color(HIGHLIGHT_COLOR)
+        tick.set_fontweight("bold")
+    ax.set_xlabel(xlabel)
+    ax.margins(x=0.08)
+    if len(series) > 1:
+        _legend(ax, theme)
+    _finish(fig, ax, title, subtitle, theme)
+    return ChartResult(fig, hovers)

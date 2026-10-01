@@ -10,6 +10,27 @@ import pandas as pd
 
 SUPPORTED_SUFFIXES = (".csv", ".csv.gz", ".parquet", ".pq")
 
+# Defensive player credits in nflverse play-by-play: stat -> [(column prefix, weight)].
+# Each prefix has `<prefix>_player_id` / `<prefix>_player_name` and sometimes `<prefix>_team`.
+PLAYER_STATS: dict[str, list[tuple[str, float]]] = {
+    "Solo": [("solo_tackle_1", 1.0), ("solo_tackle_2", 1.0)],
+    "Ast": [("assist_tackle_1", 1.0), ("assist_tackle_2", 1.0), ("assist_tackle_3", 1.0),
+            ("assist_tackle_4", 1.0), ("tackle_with_assist_1", 1.0),
+            ("tackle_with_assist_2", 1.0)],
+    "TFL": [("tackle_for_loss_1", 1.0), ("tackle_for_loss_2", 1.0)],
+    "Sacks": [("sack", 1.0), ("half_sack_1", 0.5), ("half_sack_2", 0.5)],
+    "QB Hits": [("qb_hit_1", 1.0), ("qb_hit_2", 1.0)],
+    "PD": [("pass_defense_1", 1.0), ("pass_defense_2", 1.0)],
+    "INT": [("interception", 1.0)],
+    "FF": [("forced_fumble_player_1", 1.0), ("forced_fumble_player_2", 1.0)],
+}
+PLAYER_PREFIXES = [prefix for slots in PLAYER_STATS.values() for prefix, _ in slots]
+PLAYER_ID_COLUMNS = [f"{p}_player_id" for p in PLAYER_PREFIXES]
+PLAYER_COLUMNS = [
+    col for p in PLAYER_PREFIXES for col in (f"{p}_player_id", f"{p}_player_name", f"{p}_team")
+]
+DEFENDER_COLUMNS = ["defense_players", "defense_names", "defense_positions"]
+
 PBP_COLUMNS = [
     "game_id", "play_id", "season", "season_type", "week", "posteam", "defteam",
     "qtr", "down", "ydstogo", "yardline_100", "play_type", "pass", "rush",
@@ -21,11 +42,12 @@ PBP_COLUMNS = [
     "defense_coverage_type", "defense_man_zone_type", "number_of_pass_rushers",
     "defenders_in_box", "was_pressure", "defense_personnel", "time_to_throw",
     "n_blitzers", "n_pass_rushers", "n_defense_box", "is_play_action",
-    "is_screen_pass",
+    "is_screen_pass", *DEFENDER_COLUMNS, *PLAYER_COLUMNS,
 ]
 PARTICIPATION_COLUMNS = [
     "defense_coverage_type", "defense_man_zone_type", "number_of_pass_rushers",
     "defenders_in_box", "was_pressure", "defense_personnel", "time_to_throw",
+    *DEFENDER_COLUMNS,
 ]
 FTN_COLUMNS = [
     "n_blitzers", "n_pass_rushers", "n_defense_box", "is_play_action",
@@ -102,6 +124,28 @@ def _to_bool_float(series: pd.Series) -> pd.Series:
         else np.nan
     )
     return mapped.astype(float)
+
+
+def _split_list(series: pd.Series | None, length: int) -> list[list[str]]:
+    if series is None:
+        return [[] for _ in range(length)]
+    return [
+        [part.strip() for part in value.split(";")] if isinstance(value, str) and value else []
+        for value in series
+    ]
+
+
+def _defender_lists(df: pd.DataFrame) -> tuple[list, list, list]:
+    """On-field defenders per play (gsis ids, names, positions) from participation data."""
+    n = len(df)
+    ids = _split_list(df.get("defense_players"), n)
+    names = _split_list(df.get("defense_names"), n)
+    positions = _split_list(df.get("defense_positions"), n)
+
+    def fit(values: list[list[str]]) -> list[list[str]]:
+        return [(v + [""] * len(i))[: len(i)] for i, v in zip(ids, values, strict=True)]
+
+    return ids, fit(names), fit(positions)
 
 
 @dataclass
@@ -239,6 +283,11 @@ def normalize(pbp: pd.DataFrame) -> pd.DataFrame:
     else:
         df["pressure"] = np.nan
 
+    for col in PLAYER_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].astype("string").replace("", pd.NA)
+    df["defenders"], df["defender_names"], df["defender_positions"] = _defender_lists(df)
+
     return df.reset_index(drop=True)
 
 
@@ -250,6 +299,8 @@ class DataCapabilities:
     blitz_source: str
     pressure: bool
     box: bool
+    players: bool
+    on_field: bool
 
 
 def capabilities(df: pd.DataFrame) -> DataCapabilities:
@@ -268,4 +319,6 @@ def capabilities(df: pd.DataFrame) -> DataCapabilities:
         blitz_source=source,
         pressure=bool(df["pressure"].notna().any()),
         box=bool(df["box_count"].notna().any()),
+        players=any(c in df.columns and df[c].notna().any() for c in PLAYER_ID_COLUMNS),
+        on_field=bool((df["defenders"].str.len() > 0).any()),
     )

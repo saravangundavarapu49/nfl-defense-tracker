@@ -48,15 +48,19 @@ def format_cell(column: str, value: object) -> str:
             return ch.dec(v)
         if column.startswith("Yds"):
             return ch.num2(v)
-        return ch.num(v) if column not in ("Season", "Week", "Box") else str(int(v))
+        if column in ("Season", "Week", "Box"):
+            return str(int(v))
+        return ch.num(v) if v.is_integer() else f"{v:,.1f}"
     return str(value)
 
 
 def _who(scope: an.Scope) -> str:
-    return scope.team_name if scope.has_team else "League"
+    return scope.label
 
 
 def _subtitle(scope: an.Scope, plays: float, unit: str = "plays") -> str:
+    if scope.has_player:
+        return f"{scope.player_name} on the field - {ch.num(plays)} {unit}"
     return f"{_who(scope)} defense - {ch.num(plays)} {unit}"
 
 
@@ -70,7 +74,10 @@ NEED_COVERAGE = ("No coverage data found.\nUpload the matching nflverse "
                  "pbp_participation_YYYY file\nalongside play-by-play.")
 NEED_BLITZ = ("No pass-rush data found.\nUpload nflverse ftn_charting_YYYY "
               "and/or pbp_participation_YYYY files.")
+NEED_PLAYERS = ("No defensive player data found.\nUse a full nflverse play_by_play_YYYY "
+                "file (tackle / sack / pass-defense player columns).")
 NO_PLAYS = "No plays match the current filters."
+TOP_PLAYERS = 15
 
 
 def _empty(table: pd.DataFrame, theme: ch.Theme) -> ViewResult | None:
@@ -159,6 +166,8 @@ def coverage_kpis(scope, caps) -> list[Kpi]:
         Kpi("EPA/db in Zone", ch.dec(mz["EPA/Play"].get("Zone", np.nan))),
         Kpi("Best coverage (20+)", best["Coverage"].iloc[0] if not best.empty else "-",
             ch.dec(best["EPA/Play"].iloc[0]) if not best.empty else ""),
+        _top_player(scope, an.player_coverage(scope.team), "Plays on Ball",
+                    "Top playmaker"),
     ]
 
 
@@ -252,6 +261,8 @@ def third_kpis(scope, caps) -> list[Kpi]:
     long = team[team["ydstogo"] >= 7]
     kpis.append(Kpi("Conv % on 3rd & 7+",
                     ch.pct(long["converted"].mean() if len(long) else np.nan)))
+    kpis.append(_top_player(scope, an.player_third_down(scope.team), "Stops",
+                            "Top 3rd-down stopper"))
     return kpis
 
 
@@ -328,6 +339,8 @@ def fourth_kpis(scope, caps) -> list[Kpi]:
     if scope.has_team:
         kpis.append(Kpi("League rank", an.team_rank(by_team, scope.team_name, False),
                         "1 = best"))
+    kpis.append(_top_player(scope, an.player_fourth_and_one(scope.team), "Stops",
+                            "Top 4th & 1 stopper"))
     return kpis
 
 
@@ -411,7 +424,92 @@ def blitz_kpis(scope, caps) -> list[Kpi]:
     if scope.has_team:
         kpis.append(Kpi("Blitz-rate rank", an.team_rank(by_team, scope.team_name, False),
                         "1 = most aggressive"))
+    kpis.append(_top_player(scope, an.player_pass_rush(scope.team), "Sacks", "Sack leader"))
     return kpis
+
+
+# --- Players ---------------------------------------------------------------------
+
+def _player_label(row: pd.Series) -> str:
+    pos = f"{row['Pos']}, " if isinstance(row["Pos"], str) and row["Pos"] else ""
+    return f"{row['Player']} ({pos}{row['Team']})"
+
+
+def _player_view(scope: an.Scope, caps: DataCapabilities, theme: ch.Theme,
+                 table: pd.DataFrame, *, stack: list[str], title: str, xlabel: str,
+                 detail_cols: list[str], unit: str) -> ViewResult:
+    """Top-N leaderboard over the selected defense; the filtered player is always shown."""
+    if missing := _need(caps.players or caps.on_field, NEED_PLAYERS, theme):
+        return missing
+    table = table[table[stack].sum(axis=1) > 0] if len(table) else table
+    if empty := _empty(table, theme):
+        return empty
+    top = table.head(TOP_PLAYERS)
+    if scope.has_player and scope.player_id not in set(top["player_id"]):
+        top = pd.concat([top, table[table["player_id"] == scope.player_id]])
+    highlight = None
+    if scope.has_player:
+        hits = [i for i, pid in enumerate(top["player_id"]) if pid == scope.player_id]
+        highlight = hits[0] if hits else None
+    details = [
+        "\n".join(f"{c}: {format_cell(c, row[c])}" for c in detail_cols if c in row.index)
+        for _, row in top.iterrows()
+    ]
+    pool = "League" if scope.team_name == an.ALL else scope.team_name
+    chart = ch.player_bar([_player_label(r) for _, r in top.iterrows()],
+                          {c: top[c].tolist() for c in stack}, title=title, xlabel=xlabel,
+                          fmt=lambda v: format_cell("n", v), theme=theme, details=details,
+                          highlight=highlight,
+                          subtitle=f"{pool} defenders - top {min(len(table), TOP_PLAYERS)} of "
+                          f"{ch.num(len(table))} with {unit}  |  full list below")
+    return ViewResult(chart, table.drop(columns="player_id").reset_index(drop=True))
+
+
+def _top_player(scope: an.Scope, table: pd.DataFrame, col: str, label: str) -> Kpi:
+    """Leader for `col`, or the selected player's own total when a player is filtered."""
+    if scope.has_player:
+        mine = table[table["player_id"] == scope.player_id]
+        value = mine[col].iloc[0] if len(mine) else 0.0
+        return Kpi(f"{scope.player_name}: {col}", format_cell(col, value),
+                   f"{format_cell('Snaps', mine['Snaps'].iloc[0]) if len(mine) else 0} snaps")
+    table = table[table[col] > 0] if len(table) else table
+    if table.empty:
+        return Kpi(label, "-")
+    row = table.iloc[0]
+    return Kpi(label, str(row["Player"]), f"{format_cell(col, row[col])} {col.lower()}")
+
+
+def coverage_players_view(scope, caps, theme) -> ViewResult:
+    return _player_view(scope, caps, theme, an.player_coverage(scope.pool),
+                        stack=["PD", "INT"], title="Plays on the Ball (Pass Defense)",
+                        xlabel="Passes defensed + interceptions",
+                        detail_cols=["Snaps", "Tackles", "EPA/Play", "Man EPA", "Zone EPA"],
+                        unit="a PD or INT")
+
+
+def third_players_view(scope, caps, theme) -> ViewResult:
+    return _player_view(scope, caps, theme, an.player_third_down(scope.pool),
+                        stack=["Stops"], title="3rd Down Stops by Player",
+                        xlabel="Tackles / sacks on failed 3rd downs",
+                        detail_cols=["Snaps", "Tackles", "Sacks", "PD", "Stop %", "EPA/Play"],
+                        unit="a 3rd-down stop")
+
+
+def fourth_players_view(scope, caps, theme) -> ViewResult:
+    return _player_view(scope, caps, theme, an.player_fourth_and_one(scope.pool),
+                        stack=["Stops"], title="4th & 1 Stops by Player",
+                        xlabel="Tackles / sacks on failed 4th & 1 attempts",
+                        detail_cols=["Snaps", "Tackles", "TFL", "Stop %", "EPA/Play"],
+                        unit="a 4th & 1 stop")
+
+
+def blitz_players_view(scope, caps, theme) -> ViewResult:
+    return _player_view(scope, caps, theme, an.player_pass_rush(scope.pool),
+                        stack=["Sacks", "Non-Sack Hits"], title="Pass Rush Leaders",
+                        xlabel="Sacks + QB hits without a sack",
+                        detail_cols=["Snaps", "QB Hits", "Blitz Sacks", "Blitz QB Hits",
+                                     "EPA/Play"],
+                        unit="a sack or QB hit")
 
 
 TABS: list[TabSpec] = [
@@ -420,23 +518,27 @@ TABS: list[TabSpec] = [
         "EPA by Coverage": coverage_epa_view,
         "Man vs Zone": man_zone_view,
         "Zone Rate vs EPA": zone_rate_scatter_view,
+        "Players": coverage_players_view,
     }, coverage_kpis),
     TabSpec("3rd Down Efficiency", {
         "By Distance": third_distance_view,
         "League Ranking": third_team_view,
         "By Coverage": third_coverage_view,
         "Run/Pass & Blitz": third_call_view,
+        "Players": third_players_view,
     }, third_kpis),
     TabSpec("4th & 1", {
         "League Ranking": fourth_team_view,
         "Run vs Pass": fourth_play_type_view,
         "Defenders in Box": fourth_box_view,
         "Play Log": fourth_log_view,
+        "Players": fourth_players_view,
     }, fourth_kpis),
     TabSpec("Blitz Defense", {
         "Blitz vs No Blitz": blitz_compare_view,
         "By Pass Rushers": blitz_rushers_view,
         "Blitz Rate by Down": blitz_down_view,
         "Blitz Rate vs EPA": blitz_scatter_view,
+        "Players": blitz_players_view,
     }, blitz_kpis),
 ]

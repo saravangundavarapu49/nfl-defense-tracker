@@ -14,7 +14,7 @@ def pbp() -> pd.DataFrame:
             down = [1, 2, 3, 4][i % 4]
             ydstogo = 1 if down == 4 else [2, 5, 8, 12][i % 4]
             is_pass = i % 3 != 0
-            converted = i % 2 == 0
+            converted = i % 5 in (0, 2, 3)
             rows.append({
                 "game_id": game_id, "play_id": float(play_id), "season": 2023,
                 "season_type": "REG", "week": game + 1, "posteam": off, "defteam": deff,
@@ -29,6 +29,21 @@ def pbp() -> pd.DataFrame:
                 "fourth_down_converted": int(down == 4 and converted),
                 "fourth_down_failed": int(down == 4 and not converted),
                 "desc": f"play {play_id}",
+                "solo_tackle_1_player_id": f"{deff}-LB" if not is_pass or not converted
+                else f"{deff}-CB",
+                "solo_tackle_1_player_name": f"{deff} Linebacker" if not is_pass
+                or not converted else f"{deff} Corner",
+                "solo_tackle_1_team": deff,
+                "pass_defense_1_player_id": f"{deff}-CB" if is_pass and not converted
+                else None,
+                "pass_defense_1_player_name": f"{deff} Corner" if is_pass and not converted
+                else None,
+                "sack_player_id": f"{deff}-DE" if is_pass and i == 5 else None,
+                "sack_player_name": f"{deff} Edge" if is_pass and i == 5 else None,
+                "qb_hit_1_player_id": f"{deff}-DE" if is_pass and i in (5, 7) else None,
+                "qb_hit_1_player_name": f"{deff} Edge" if is_pass and i in (5, 7) else None,
+                "interception_player_id": None,
+                "interception_player_name": None,
             })
             play_id += 1
         rows.append({"game_id": game_id, "play_id": float(play_id), "season": 2023,
@@ -51,6 +66,10 @@ def participation(pbp: pd.DataFrame) -> pd.DataFrame:
     out["number_of_pass_rushers"] = [float([4, 5, 6, 0][i % 4]) for i in range(len(out))]
     out["defenders_in_box"] = [6 + i % 3 for i in range(len(out))]
     out["was_pressure"] = [i % 2 == 0 for i in range(len(out))]
+    defteams = pbp["defteam"].tolist()
+    out["defense_players"] = [f"{t}-LB;{t}-CB;{t}-DE" for t in defteams]
+    out["defense_names"] = [f"{t} Linebacker;{t} Corner;{t} Edge" for t in defteams]
+    out["defense_positions"] = ["ILB;CB;DE"] * len(out)
     return out
 
 

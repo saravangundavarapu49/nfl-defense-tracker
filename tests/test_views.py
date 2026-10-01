@@ -35,6 +35,20 @@ def test_every_view_renders(pbp, participation, ftn, team):
             assert result.chart.hovers, name
 
 
+def test_player_filter_highlights_player(pbp, participation, ftn):
+    plays = _plays(pbp, participation, ftn)
+    scope = an.apply_filters(plays, an.Filters(team="KC", player_id="KC-DE",
+                                               player_name="KC Edge"))
+    caps = capabilities(plays)
+    result = TABS[3].views["Players"](scope, caps, ch.DARK)
+    assert "KC Edge" in result.table["Player"].tolist()
+    assert any("KC Edge" in t.labels[0] for t in result.chart.hovers)
+    kpis = TABS[3].kpis(scope, caps)
+    assert kpis[-1].label == "KC Edge: Sacks"
+    texts = TABS[1].views["By Distance"](scope, caps, ch.DARK).chart.figure.axes[0].texts
+    assert any("KC Edge on the field" in t.get_text() for t in texts)
+
+
 def test_views_explain_missing_data(pbp):
     plays = _plays(pbp)
     scope = an.apply_filters(plays, an.Filters())
@@ -64,3 +78,4 @@ def test_format_cell():
     assert format_cell("Team", "BAL") == "BAL"
     assert format_cell("EPA", float("nan")) == "-"
     assert format_cell("Yds/Play", 4.5) == "4.50"
+    assert format_cell("Sacks", 4.5) == "4.5"

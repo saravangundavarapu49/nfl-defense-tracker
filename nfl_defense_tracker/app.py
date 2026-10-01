@@ -6,6 +6,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from dataclasses import replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
@@ -32,6 +33,7 @@ FILE_TYPES = [
 ]
 SEASON_TYPES = {"All": an.ALL, "Regular": "REG", "Playoffs": "POST"}
 MAX_TABLE_ROWS = 2000
+MAX_PLAYER_CHOICES = 40
 
 
 def current_theme() -> ch.Theme:
@@ -74,11 +76,14 @@ class ChartHover:
                 self.annotation.set_visible(False)
                 self.canvas.draw_idle()
             return
-        width = self.result.figure.bbox.width
+        bbox = self.result.figure.bbox
+        right = event.x > bbox.width * 0.7
+        top = event.y > bbox.height * 0.55
         self.annotation.xy = (event.x, event.y)
         self.annotation.set_text(text)
-        self.annotation.set_horizontalalignment("right" if event.x > width * 0.7 else "left")
-        self.annotation.xyann = (-14 if event.x > width * 0.7 else 14, 14)
+        self.annotation.set_horizontalalignment("right" if right else "left")
+        self.annotation.set_verticalalignment("top" if top else "bottom")
+        self.annotation.xyann = (-14 if right else 14, -14 if top else 14)
         self.annotation.set_visible(True)
         self.canvas.draw_idle()
 
@@ -116,7 +121,8 @@ class DataTable(ctk.CTkFrame):
             self.tree.heading(col, text=col + arrow, command=lambda c=col: self.sort_by(c))
             wide = col == "Description"
             scale = self.winfo_fpixels("1i") / 96
-            self.tree.column(col, width=int((520 if wide else 105) * scale), minwidth=60,
+            width = 520 if wide else 180 if col == "Player" else 105
+            self.tree.column(col, width=int(width * scale), minwidth=60,
                              anchor="w" if wide or frame[col].dtype == object else "center",
                              stretch=not wide)
         for i, row in enumerate(frame.head(MAX_TABLE_ROWS).itertuples(index=False)):
@@ -134,7 +140,8 @@ class KpiCard(ctk.CTkFrame):
         super().__init__(master, corner_radius=8)
         ctk.CTkLabel(self, text=label.upper(), font=ctk.CTkFont(size=10, weight="bold"),
                      text_color=("gray35", "gray65")).pack(anchor="w", padx=12, pady=(8, 0))
-        ctk.CTkLabel(self, text=value, font=ctk.CTkFont(size=20, weight="bold")).pack(
+        size = 20 if len(value) <= 10 else 15 if len(value) <= 16 else 12
+        ctk.CTkLabel(self, text=value, font=ctk.CTkFont(size=size, weight="bold")).pack(
             anchor="w", padx=12)
         ctk.CTkLabel(self, text=detail or " ", font=ctk.CTkFont(size=10),
                      text_color=("gray40", "gray60")).pack(anchor="w", padx=12, pady=(0, 6))
@@ -238,6 +245,8 @@ class TrackerApp(ctk.CTk):
         self.loading = False
         self.results: queue.Queue = queue.Queue()
         self.dirty: set[str] = set()
+        self.player_ids: dict[str, str] = {}
+        self.roster_key: tuple | None = None
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -291,21 +300,28 @@ class TrackerApp(ctk.CTk):
                                            command=lambda _v: self.refresh())
         self.team_menu.grid(row=8, pady=(0, 8), **pad)
 
-        ctk.CTkLabel(side, text="Season", anchor="w").grid(row=9, **pad)
+        ctk.CTkLabel(side, text="Player (type to search)", anchor="w").grid(row=9, **pad)
+        self.player_box = ctk.CTkComboBox(side, values=[an.ALL],
+                                          command=lambda _v: self.refresh())
+        self.player_box.set(an.ALL)
+        self.player_box.bind("<KeyRelease>", self.on_player_typed)
+        self.player_box.grid(row=10, pady=(0, 8), **pad)
+
+        ctk.CTkLabel(side, text="Season", anchor="w").grid(row=11, **pad)
         self.season_menu = ctk.CTkOptionMenu(side, values=[an.ALL],
                                              command=lambda _v: self.refresh())
-        self.season_menu.grid(row=10, pady=(0, 8), **pad)
+        self.season_menu.grid(row=12, pady=(0, 8), **pad)
 
-        ctk.CTkLabel(side, text="Season type", anchor="w").grid(row=11, **pad)
+        ctk.CTkLabel(side, text="Season type", anchor="w").grid(row=13, **pad)
         self.type_buttons = ctk.CTkSegmentedButton(side, values=list(SEASON_TYPES),
                                                    command=lambda _v: self.refresh())
         self.type_buttons.set("All")
-        self.type_buttons.grid(row=12, pady=(0, 8), **pad)
+        self.type_buttons.grid(row=14, pady=(0, 8), **pad)
 
         weeks = [str(w) for w in range(1, 23)]
-        ctk.CTkLabel(side, text="Weeks", anchor="w").grid(row=13, **pad)
+        ctk.CTkLabel(side, text="Weeks", anchor="w").grid(row=15, **pad)
         week_row = ctk.CTkFrame(side, fg_color="transparent")
-        week_row.grid(row=14, pady=(0, 8), **pad)
+        week_row.grid(row=16, pady=(0, 8), **pad)
         week_row.grid_columnconfigure((0, 2), weight=1)
         self.week_min = ctk.CTkOptionMenu(week_row, values=weeks, width=90,
                                           command=lambda _v: self.refresh())
@@ -319,13 +335,13 @@ class TrackerApp(ctk.CTk):
 
         ctk.CTkButton(side, text="Reset filters", fg_color="transparent", border_width=1,
                       text_color=("gray10", "gray90"), command=self.reset_filters).grid(
-            row=15, pady=(4, 16), **pad)
+            row=17, pady=(4, 16), **pad)
 
-        ctk.CTkLabel(side, text="Appearance", anchor="w").grid(row=16, **pad)
+        ctk.CTkLabel(side, text="Appearance", anchor="w").grid(row=18, **pad)
         appearance = ctk.CTkSegmentedButton(side, values=["Dark", "Light"],
                                             command=self.set_appearance)
         appearance.set("Dark")
-        appearance.grid(row=17, pady=(0, 16), **pad)
+        appearance.grid(row=19, pady=(0, 16), **pad)
 
     def _build_main(self) -> None:
         self.tabview = ctk.CTkTabview(self, command=self.on_tab_change)
@@ -419,6 +435,10 @@ class TrackerApp(ctk.CTk):
         self._set_files_text()
         self.team_menu.configure(values=[an.ALL])
         self.season_menu.configure(values=[an.ALL])
+        self.player_ids = {}
+        self.roster_key = None
+        self.player_box.configure(values=[an.ALL])
+        self.player_box.set(an.ALL)
         for panel in self.panels.values():
             panel.scope = None
         self.set_status("Data cleared.")
@@ -443,7 +463,9 @@ class TrackerApp(ctk.CTk):
             f"Coverage data: {yes if self.caps.coverage else no}\n"
             f"Blitz data: {self.caps.blitz_source}\n"
             f"Pressure data: {yes if self.caps.pressure else no}\n"
-            f"Box counts: {yes if self.caps.box else no}"))
+            f"Box counts: {yes if self.caps.box else no}\n"
+            f"Player stats: {yes if self.caps.players else no}\n"
+            f"On-field defenders: {yes if self.caps.on_field else no}"))
 
     def _populate_filters(self, plays: pd.DataFrame) -> None:
         teams = sorted(plays["defteam"].dropna().unique().tolist())
@@ -461,18 +483,62 @@ class TrackerApp(ctk.CTk):
     def current_filters(self) -> an.Filters:
         season = self.season_menu.get()
         lo, hi = int(self.week_min.get()), int(self.week_max.get())
+        label = self.player_box.get()
         return an.Filters(
             seasons=() if season == an.ALL else (int(season),),
             season_type=SEASON_TYPES[self.type_buttons.get()],
             team=self.team_menu.get(),
             week_min=min(lo, hi),
             week_max=max(lo, hi),
+            player_id=self.player_ids.get(label, an.ALL),
+            player_name=label.split(" (")[0] if label in self.player_ids else "",
         )
+
+    def _update_roster(self, filters: an.Filters) -> an.Filters:
+        """Refresh the player picker for the current defense/season/week filters and drop
+        a selected player who no longer appears in them."""
+        key = (filters.seasons, filters.season_type, filters.team, filters.week_min,
+               filters.week_max)
+        if key == self.roster_key or self.plays is None:
+            return filters
+        self.roster_key = key
+        defense = an.apply_filters(self.plays, replace(filters, player_id=an.ALL)).team
+        players = an.roster(defense)
+        self.player_ids = {}
+        for row in players.itertuples(index=False):
+            pos = f"{row.Pos}, " if row.Pos else ""
+            label = f"{row.Player} ({pos}{row.Team})"
+            if label in self.player_ids:
+                label = f"{label} [{row.player_id}]"
+            self.player_ids[label] = row.player_id
+        self.player_box.configure(values=[an.ALL, *list(self.player_ids)[:MAX_PLAYER_CHOICES]])
+        if self.player_box.get() not in self.player_ids:
+            self.player_box.set(an.ALL)
+            return replace(filters, player_id=an.ALL, player_name="")
+        return filters
+
+    def on_player_typed(self, event: tk.Event) -> None:
+        text = self.player_box.get().strip().lower()
+        if event.keysym == "Return":
+            matches = [lbl for lbl in self.player_ids if text in lbl.lower()]
+            exact = [lbl for lbl in matches if lbl.lower().startswith(text)]
+            if text in ("", an.ALL.lower()):
+                self.player_box.set(an.ALL)
+            elif matches:
+                self.player_box.set((exact or matches)[0])
+            else:
+                self.set_status(f"No defender matches '{text}'.")
+                return
+            self.refresh()
+            return
+        matches = [lbl for lbl in self.player_ids if text in lbl.lower()] if text else list(
+            self.player_ids)
+        self.player_box.configure(values=[an.ALL, *matches[:MAX_PLAYER_CHOICES]])
 
     def refresh(self) -> None:
         if self.plays is None or self.caps is None:
             return
-        filters = self.current_filters()
+        filters = self._update_roster(self.current_filters())
         scope = an.apply_filters(self.plays, filters)
         for panel in self.panels.values():
             panel.scope = scope
@@ -480,6 +546,8 @@ class TrackerApp(ctk.CTk):
         self.dirty = set(self.panels)
         self._render_active()
         who = filters.team if filters.team != an.ALL else "all defenses"
+        if scope.has_player:
+            who = f"{scope.player_name} on the field ({who})"
         self.set_status(f"{len(scope.team):,} plays for {who} "
                         f"({len(scope.league):,} league plays in filter). Hover charts for "
                         "details; use the toolbar to zoom, pan or save.")
@@ -495,6 +563,7 @@ class TrackerApp(ctk.CTk):
 
     def reset_filters(self) -> None:
         self.team_menu.set(an.ALL)
+        self.player_box.set(an.ALL)
         self.type_buttons.set("All")
         self.week_min.set("1")
         self.week_max.set("22")
